@@ -1,19 +1,56 @@
 import { useEffect, useState, useCallback } from 'react'
+import {
+  Check, X, HelpCircle, Star, StarOff, Trash2, MapPin, Clock,
+  CalendarDays, Lock, Unlock, Plus, Minus, RefreshCw, Wallet,
+  UserPlus, Users, Repeat, Banknote
+} from 'lucide-react'
 import { supabase } from './supabaseClient'
+import BallIcon from './BallIcon'
 
 const EVENT_ROW_ID = 1
+const SEASON_ROW_ID = 1
 const STORAGE_KEY = 'football_my_name'
+const GAME_PRICE = 350
+const DEFAULT_LOCATION = 'Северный'
 
-function emptyState(name, target) {
+function emptyEvent(fields) {
   return {
-    name,
-    target: target || null,
+    location: fields.location || DEFAULT_LOCATION,
+    venueType: fields.venueType || 'зал',
+    date: fields.date || '',
+    startTime: fields.startTime || '19:30',
+    endTime: fields.endTime || '20:30',
     isOpen: true,
     createdAt: Date.now(),
     going: {},
     notGoing: {},
-    thinking: {}
+    thinking: {},
+    guests: []
   }
+}
+
+function emptySeason() {
+  return { pricePerGame: GAME_PRICE, remainingGames: 0, upcomingDates: [] }
+}
+
+function formatDuration(start, end) {
+  if (!start || !end) return null
+  const [sh, sm] = start.split(':').map(Number)
+  const [eh, em] = end.split(':').map(Number)
+  let minutes = (eh * 60 + em) - (sh * 60 + sm)
+  if (minutes < 0) minutes += 24 * 60
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  if (h && m) return `${h} ч ${m} мин`
+  if (h) return `${h} ч`
+  return `${m} мин`
+}
+
+function formatDateLabel(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(dateStr + 'T00:00:00')
+  if (isNaN(d)) return dateStr
+  return d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' })
 }
 
 export default function App() {
@@ -21,55 +58,65 @@ export default function App() {
   const [roster, setRoster] = useState([])
   const [newRosterName, setNewRosterName] = useState('')
   const [state, setState] = useState(null)
+  const [season, setSeason] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  // --- load roster ---
   const loadRoster = useCallback(async () => {
-    const { data, error } = await supabase.from('roster').select('name').order('name')
-    if (!error && data) setRoster(data.map(r => r.name))
+    const { data, error } = await supabase.from('roster').select('name, is_priority').order('name')
+    if (!error && data) setRoster(data)
   }, [])
 
-  // --- load event state ---
   const loadEvent = useCallback(async () => {
     const { data, error } = await supabase
-      .from('event_state')
-      .select('data')
-      .eq('id', EVENT_ROW_ID)
-      .maybeSingle()
+      .from('event_state').select('data').eq('id', EVENT_ROW_ID).maybeSingle()
     if (!error) setState(data ? data.data : null)
     setLoading(false)
   }, [])
 
-  useEffect(() => {
-    loadRoster()
-    loadEvent()
+  const loadSeason = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('season_state').select('data').eq('id', SEASON_ROW_ID).maybeSingle()
+    if (!error) setSeason(data ? data.data : emptySeason())
+  }, [])
 
-    const channel = supabase
-      .channel('event_state_changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'event_state', filter: `id=eq.${EVENT_ROW_ID}` },
+  useEffect(() => {
+    loadRoster(); loadEvent(); loadSeason()
+
+    const eventChannel = supabase.channel('event_state_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'event_state', filter: `id=eq.${EVENT_ROW_ID}` },
         payload => {
           if (payload.new && 'data' in payload.new) setState(payload.new.data)
           if (payload.eventType === 'DELETE') setState(null)
-        }
-      )
-      .subscribe()
+        }).subscribe()
+
+    const seasonChannel = supabase.channel('season_state_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'season_state', filter: `id=eq.${SEASON_ROW_ID}` },
+        payload => { if (payload.new && 'data' in payload.new) setSeason(payload.new.data) }).subscribe()
+
+    const rosterChannel = supabase.channel('roster_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'roster' }, () => loadRoster()).subscribe()
 
     return () => {
-      supabase.removeChannel(channel)
+      supabase.removeChannel(eventChannel)
+      supabase.removeChannel(seasonChannel)
+      supabase.removeChannel(rosterChannel)
     }
-  }, [loadRoster, loadEvent])
+  }, [loadRoster, loadEvent, loadSeason])
 
   const saveState = useCallback(async next => {
-    setState(next) // optimistic
+    setState(next)
     await supabase.from('event_state').upsert({ id: EVENT_ROW_ID, data: next })
+  }, [])
+
+  const saveSeason = useCallback(async next => {
+    setSeason(next)
+    await supabase.from('season_state').upsert({ id: SEASON_ROW_ID, data: next })
   }, [])
 
   const pickName = async name => {
     const trimmed = name.trim()
     if (!trimmed) return
-    if (!roster.includes(trimmed)) {
+    if (!roster.some(r => r.name === trimmed)) {
       await supabase.from('roster').insert({ name: trimmed })
       loadRoster()
     }
@@ -77,15 +124,16 @@ export default function App() {
     setMyName(trimmed)
   }
 
-  const switchUser = () => {
-    localStorage.removeItem(STORAGE_KEY)
-    setMyName('')
+  const switchUser = () => { localStorage.removeItem(STORAGE_KEY); setMyName('') }
+
+  const togglePriority = async name => {
+    const r = roster.find(r => r.name === name)
+    if (!r) return
+    await supabase.from('roster').update({ is_priority: !r.is_priority }).eq('name', name)
+    loadRoster()
   }
 
-  // --- event actions ---
-  const createEvent = async (name, target) => {
-    await saveState(emptyState(name, target))
-  }
+  const createEvent = async fields => { await saveState(emptyEvent(fields)) }
 
   const resetEvent = async () => {
     if (!window.confirm('Удалить текущий сбор и начать новый? Действие необратимо для всех.')) return
@@ -96,21 +144,10 @@ export default function App() {
   const vote = async kind => {
     if (!myName) return
     const next = structuredClone(state)
-    delete next.notGoing[myName]
-    delete next.thinking[myName]
-    delete next.going[myName]
-    if (kind === 'go') next.going[myName] = { plusOne: 0, selfPaid: false, guestsPaid: 0 }
-    if (kind === 'notgo') next.notGoing[myName] = true
+    delete next.notGoing[myName]; delete next.thinking[myName]; delete next.going[myName]
+    if (kind === 'go') next.going[myName] = { selfPaid: false }
+    if (kind === 'notgo') next.notGoing[myName] = { replacedBy: null, settled: false }
     if (kind === 'think') next.thinking[myName] = true
-    await saveState(next)
-  }
-
-  const changeGuests = async delta => {
-    if (!state.going[myName]) return
-    const next = structuredClone(state)
-    const p = next.going[myName]
-    p.plusOne = Math.max(0, p.plusOne + delta)
-    if (p.guestsPaid > p.plusOne) p.guestsPaid = p.plusOne
     await saveState(next)
   }
 
@@ -121,11 +158,41 @@ export default function App() {
     await saveState(next)
   }
 
-  const payGuest = async (name, delta) => {
+  const addGuest = async guestName => {
+    const trimmed = guestName.trim()
+    if (!trimmed || !myName) return
     const next = structuredClone(state)
-    const p = next.going[name]
-    if (!p) return
-    p.guestsPaid = Math.max(0, Math.min((p.guestsPaid || 0) + delta, p.plusOne))
+    next.guests = next.guests || []
+    next.guests.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: trimmed, addedBy: myName, paid: false })
+    await saveState(next)
+  }
+
+  const removeGuest = async id => {
+    const next = structuredClone(state)
+    next.guests = (next.guests || []).filter(g => g.id !== id)
+    await saveState(next)
+  }
+
+  const toggleGuestPaid = async id => {
+    const next = structuredClone(state)
+    const g = (next.guests || []).find(g => g.id === id)
+    if (!g) return
+    g.paid = !g.paid
+    await saveState(next)
+  }
+
+  const setSubstitute = async (priorityName, substituteName) => {
+    const next = structuredClone(state)
+    if (!next.notGoing[priorityName]) return
+    next.notGoing[priorityName].replacedBy = substituteName || null
+    next.notGoing[priorityName].settled = false
+    await saveState(next)
+  }
+
+  const toggleSettled = async priorityName => {
+    const next = structuredClone(state)
+    if (!next.notGoing[priorityName]) return
+    next.notGoing[priorityName].settled = !next.notGoing[priorityName].settled
     await saveState(next)
   }
 
@@ -135,38 +202,87 @@ export default function App() {
     await saveState(next)
   }
 
+  const updateEventField = async (field, value) => {
+    const next = structuredClone(state)
+    next[field] = value
+    await saveState(next)
+  }
+
+  const adjustRemainingGames = async delta => {
+    const next = structuredClone(season)
+    next.remainingGames = Math.max(0, (next.remainingGames || 0) + delta)
+    await saveSeason(next)
+  }
+
+  const addUpcomingDate = async dateFields => {
+    const next = structuredClone(season)
+    next.upcomingDates = next.upcomingDates || []
+    next.upcomingDates.push({ id: `${Date.now()}`, ...dateFields })
+    next.upcomingDates.sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+    await saveSeason(next)
+  }
+
+  const removeUpcomingDate = async id => {
+    const next = structuredClone(season)
+    next.upcomingDates = (next.upcomingDates || []).filter(d => d.id !== id)
+    await saveSeason(next)
+  }
+
+  const createEventFromDate = async d => {
+    await createEvent({ location: d.location, venueType: d.venueType, date: d.date, startTime: d.startTime, endTime: d.endTime })
+    await removeUpcomingDate(d.id)
+    const next = structuredClone(season)
+    next.remainingGames = Math.max(0, (next.remainingGames || 0) - 1)
+    await saveSeason(next)
+  }
+
   if (loading) return <div className="wrap"><p className="empty">Загрузка…</p></div>
 
   return (
     <div className="wrap">
-      <h1>⚽ Сбор на футбол</h1>
-      <div className="sub">Общая ссылка для всей компании — не зависит от мессенджера</div>
+      <div className="brand">
+        <BallIcon size={34} />
+        <div>
+          <h1>Сбор на футбол</h1>
+          <div className="sub">Общая ссылка для всей компании — не зависит от мессенджера</div>
+        </div>
+      </div>
 
       {!myName ? (
-        <NameGate
-          roster={roster}
-          newRosterName={newRosterName}
-          setNewRosterName={setNewRosterName}
-          onPick={pickName}
-        />
-      ) : !state ? (
-        <>
-          <Whoami name={myName} onSwitch={switchUser} />
-          <Setup onCreate={createEvent} />
-        </>
+        <NameGate roster={roster} newRosterName={newRosterName} setNewRosterName={setNewRosterName} onPick={pickName} />
       ) : (
         <>
           <Whoami name={myName} onSwitch={switchUser} />
-          <Board
-            state={state}
-            myName={myName}
-            vote={vote}
-            changeGuests={changeGuests}
-            toggleSelfPaid={toggleSelfPaid}
-            payGuest={payGuest}
-            toggleOpen={toggleOpen}
-            resetEvent={resetEvent}
+
+          <SeasonCard
+            season={season}
+            adjustRemainingGames={adjustRemainingGames}
+            addUpcomingDate={addUpcomingDate}
+            removeUpcomingDate={removeUpcomingDate}
+            createEventFromDate={createEventFromDate}
+            hasActiveEvent={!!state}
           />
+
+          {!state ? (
+            <Setup onCreate={createEvent} />
+          ) : (
+            <Board
+              state={state}
+              myName={myName}
+              roster={roster}
+              vote={vote}
+              toggleSelfPaid={toggleSelfPaid}
+              addGuest={addGuest}
+              removeGuest={removeGuest}
+              toggleGuestPaid={toggleGuestPaid}
+              setSubstitute={setSubstitute}
+              toggleSettled={toggleSettled}
+              toggleOpen={toggleOpen}
+              resetEvent={resetEvent}
+              updateEventField={updateEventField}
+              togglePriority={togglePriority}
+            />
+          )}
         </>
       )}
     </div>
@@ -179,23 +295,18 @@ function NameGate({ roster, newRosterName, setNewRosterName, onPick }) {
       <label>Вы кто из списка?</label>
       {roster.length > 0 && (
         <div className="rosterList">
-          {roster.map(n => (
-            <button key={n} className="btn-ghost rosterBtn" onClick={() => onPick(n)}>
-              {n}
+          {roster.map(r => (
+            <button key={r.name} className="btn-ghost rosterBtn" onClick={() => onPick(r.name)}>
+              {r.is_priority && <Star size={14} className="icon-star" />} {r.name}
             </button>
           ))}
         </div>
       )}
       <label style={{ marginTop: 16 }}>Не нашли себя? Добавьтесь в список</label>
       <div className="row">
-        <input
-          type="text"
-          placeholder="Ваше имя"
-          value={newRosterName}
-          onChange={e => setNewRosterName(e.target.value)}
-        />
+        <input type="text" placeholder="Ваше имя" value={newRosterName} onChange={e => setNewRosterName(e.target.value)} />
         <button className="btn-primary" onClick={() => onPick(newRosterName)}>
-          Это я
+          <UserPlus size={16} /> Это я
         </button>
       </div>
       <div className="empty" style={{ marginTop: 10 }}>
@@ -208,115 +319,226 @@ function NameGate({ roster, newRosterName, setNewRosterName, onPick }) {
 function Whoami({ name, onSwitch }) {
   return (
     <div className="whoami">
-      Вы: <b>{name}</b> &nbsp;<button className="link" onClick={onSwitch}>не я / сменить</button>
+      <Users size={14} /> Вы: <b>{name}</b>
+      <button className="link" onClick={onSwitch}>не я / сменить</button>
+    </div>
+  )
+}
+
+function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcomingDate, createEventFromDate, hasActiveEvent }) {
+  const [showAdd, setShowAdd] = useState(false)
+  const [form, setForm] = useState({ date: '', startTime: '19:30', endTime: '20:30', location: DEFAULT_LOCATION, venueType: 'зал' })
+
+  if (!season) return null
+  const dates = season.upcomingDates || []
+
+  return (
+    <div className="card season-card">
+      <div className="section-title icon-title" style={{ marginTop: 0 }}><Wallet size={15} /> Абонемент</div>
+      <div className="row" style={{ alignItems: 'center', marginBottom: 6 }}>
+        <div className="stat" style={{ flex: 'none' }}>
+          <b>{season.remainingGames || 0}</b>оплаченных игр осталось
+        </div>
+        <span className="pm-row">
+          <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(-1)}><Minus size={16} /></button>
+          <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(1)}><Plus size={16} /></button>
+        </span>
+      </div>
+      <div className="empty" style={{ marginBottom: 10 }}>Цена одной игры: {season.pricePerGame || GAME_PRICE} ₽ (для расчёта замен)</div>
+
+      <div className="section-title icon-title"><CalendarDays size={15} /> Ближайшие даты</div>
+      {dates.length ? dates.map(d => (
+        <div className="person" key={d.id}>
+          <span>{formatDateLabel(d.date)}, {d.startTime}–{d.endTime} · {d.location} ({d.venueType})</span>
+          <span className="pm-row">
+            {!hasActiveEvent && <button className="link" onClick={() => createEventFromDate(d)}>Создать сбор</button>}
+            <button className="icon-btn-ghost" onClick={() => removeUpcomingDate(d.id)}><Trash2 size={14} /></button>
+          </span>
+        </div>
+      )) : <div className="empty">—</div>}
+
+      {!showAdd ? (
+        <button className="btn-ghost" style={{ marginTop: 10 }} onClick={() => setShowAdd(true)}><Plus size={16} /> Добавить дату</button>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          <label>Дата</label>
+          <input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} />
+          <div className="row">
+            <div style={{ flex: 1 }}><label>С</label><input type="time" value={form.startTime} onChange={e => setForm({ ...form, startTime: e.target.value })} /></div>
+            <div style={{ flex: 1 }}><label>До</label><input type="time" value={form.endTime} onChange={e => setForm({ ...form, endTime: e.target.value })} /></div>
+          </div>
+          <label>Место</label>
+          <input type="text" value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} />
+          <div className="row" style={{ marginBottom: 14 }}>
+            <button className={`btn-ghost ${form.venueType === 'зал' ? 'active' : ''}`} onClick={() => setForm({ ...form, venueType: 'зал' })}>Зал</button>
+            <button className={`btn-ghost ${form.venueType === 'улица' ? 'active' : ''}`} onClick={() => setForm({ ...form, venueType: 'улица' })}>Улица</button>
+          </div>
+          <div className="row">
+            <button className="btn-primary" onClick={() => {
+              if (!form.date) return alert('Укажите дату')
+              addUpcomingDate(form)
+              setForm({ date: '', startTime: '19:30', endTime: '20:30', location: DEFAULT_LOCATION, venueType: 'зал' })
+              setShowAdd(false)
+            }}>Сохранить</button>
+            <button className="btn-ghost" onClick={() => setShowAdd(false)}>Отмена</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 function Setup({ onCreate }) {
-  const [name, setName] = useState('')
-  const [target, setTarget] = useState('')
+  const [location, setLocation] = useState(DEFAULT_LOCATION)
+  const [venueType, setVenueType] = useState('зал')
+  const [date, setDate] = useState('')
+  const [startTime, setStartTime] = useState('19:30')
+  const [endTime, setEndTime] = useState('20:30')
+
   return (
     <div className="card">
-      <label>Название сбора</label>
-      <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Футзал в субботу, 20:00" />
-      <label>Нужно человек (необязательно)</label>
-      <input type="text" value={target} onChange={e => setTarget(e.target.value)} placeholder="10 или 15" />
-      <button
-        className="btn-primary"
-        style={{ width: '100%' }}
-        onClick={() => {
-          if (!name.trim()) return alert('Введите название')
-          onCreate(name.trim(), target.trim())
-        }}
-      >
-        Создать сбор
-      </button>
+      <div className="section-title icon-title" style={{ marginTop: 0 }}><Plus size={15} /> Новый сбор</div>
+      <label>Место</label>
+      <input type="text" value={location} onChange={e => setLocation(e.target.value)} />
+      <div className="row" style={{ marginBottom: 14 }}>
+        <button className={`btn-ghost ${venueType === 'зал' ? 'active' : ''}`} onClick={() => setVenueType('зал')}>Зал</button>
+        <button className={`btn-ghost ${venueType === 'улица' ? 'active' : ''}`} onClick={() => setVenueType('улица')}>Улица</button>
+      </div>
+      <label>Дата</label>
+      <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+      <div className="row">
+        <div style={{ flex: 1 }}><label>С</label><input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} /></div>
+        <div style={{ flex: 1 }}><label>До</label><input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} /></div>
+      </div>
+      <div className="empty" style={{ marginBottom: 14 }}>Длительность: {formatDuration(startTime, endTime) || '—'}</div>
+      <button className="btn-primary" style={{ width: '100%' }} onClick={() => {
+        if (!date) return alert('Укажите дату')
+        onCreate({ location: location.trim() || DEFAULT_LOCATION, venueType, date, startTime, endTime })
+      }}>Создать сбор</button>
     </div>
   )
 }
 
-function Board({ state, myName, vote, changeGuests, toggleSelfPaid, payGuest, toggleOpen, resetEvent }) {
+function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGuest, toggleGuestPaid, setSubstitute, toggleSettled, toggleOpen, resetEvent, updateEventField, togglePriority }) {
+  const [guestName, setGuestName] = useState('')
+  const priorityNames = new Set(roster.filter(r => r.is_priority).map(r => r.name))
+
   const goingEntries = Object.entries(state.going || {})
-  const plusCount = goingEntries.reduce((s, [, v]) => s + (v.plusOne || 0), 0)
-  const totalGoing = goingEntries.length + plusCount
-  const notEntries = Object.keys(state.notGoing || {})
+  const notEntries = Object.entries(state.notGoing || {})
   const thinkEntries = Object.keys(state.thinking || {})
+  const guests = state.guests || []
+
+  const totalGoing = goingEntries.length + guests.length
+  const price = 350
 
   let totalPaid = 0
   if (!state.isOpen) {
-    goingEntries.forEach(([, v]) => {
-      if (v.selfPaid) totalPaid += 1
-      totalPaid += v.guestsPaid || 0
-    })
+    goingEntries.forEach(([, v]) => { if (v.selfPaid) totalPaid += 1 })
+    guests.forEach(g => { if (g.paid) totalPaid += 1 })
   }
 
-  const myEntry = state.going?.[myName]
+  const availableForSubstitution = goingEntries.map(([n]) => n)
 
   return (
     <div className="card">
-      <div className="event-name">{state.name}</div>
+      <div className="event-name">
+        <EditableText value={state.location} onSave={v => updateEventField('location', v)} />
+        <span className="venue-toggle">
+          <button className={`chip ${state.venueType === 'зал' ? 'chip-active' : ''}`} onClick={() => updateEventField('venueType', 'зал')}>Зал</button>
+          <button className={`chip ${state.venueType === 'улица' ? 'chip-active' : ''}`} onClick={() => updateEventField('venueType', 'улица')}>Улица</button>
+        </span>
+      </div>
+      <div className="empty icon-title" style={{ margin: '2px 0 8px' }}>
+        <CalendarDays size={14} /> {state.date ? formatDateLabel(state.date) : 'дата не указана'}
+      </div>
+
+      <div className="row" style={{ marginBottom: 4 }}>
+        <div style={{ flex: 1 }}><label>С</label><input type="time" value={state.startTime} onChange={e => updateEventField('startTime', e.target.value)} /></div>
+        <div style={{ flex: 1 }}><label>До</label><input type="time" value={state.endTime} onChange={e => updateEventField('endTime', e.target.value)} /></div>
+      </div>
+      <div className="empty icon-title" style={{ margin: '-8px 0 12px' }}>
+        <Clock size={13} /> {formatDuration(state.startTime, state.endTime) || '—'} · время может править кто угодно
+      </div>
+
       <span className={`status ${state.isOpen ? 'open' : 'closed'}`}>
-        {state.isOpen ? 'сбор открыт' : 'сбор закрыт'}
+        {state.isOpen ? <Unlock size={12} /> : <Lock size={12} />} {state.isOpen ? 'сбор открыт' : 'сбор закрыт'}
       </span>
-      {state.target && <div className="empty" style={{ margin: '-4px 0 10px' }}>Нужно: {state.target} человек</div>}
 
       {state.isOpen ? (
-        <>
-          <div className="row" style={{ marginBottom: 8 }}>
-            <button className="btn-primary" onClick={() => vote('go')}>✅ Иду</button>
-            <button className="btn-ghost" onClick={() => vote('notgo')}>❌ Не иду</button>
-            <button className="btn-ghost" onClick={() => vote('think')}>🤔 Думаю</button>
-          </div>
-          {myEntry && (
-            <div className="row">
-              <button className="btn-ghost" onClick={() => changeGuests(-1)}>− гостя</button>
-              <button className="btn-ghost" onClick={() => changeGuests(1)}>+ гостя</button>
-            </div>
-          )}
-        </>
+        <div className="row" style={{ margin: '8px 0' }}>
+          <button className="btn-primary" onClick={() => vote('go')}><Check size={16} /> Иду</button>
+          <button className="btn-ghost" onClick={() => vote('notgo')}><X size={16} /> Не иду</button>
+          <button className="btn-ghost" onClick={() => vote('think')}><HelpCircle size={16} /> Думаю</button>
+        </div>
       ) : (
         <div className="empty">Сбор закрыт — можно только отмечать оплаты</div>
       )}
 
-      <div className="section-title">Идут ({goingEntries.length}{plusCount ? ` +${plusCount}` : ''})</div>
-      {goingEntries.length ? (
-        goingEntries.map(([name, v]) => (
-          <div key={name}>
-            <div className="person">
-              <span>
-                ✅ {name} {!state.isOpen && v.selfPaid && <span className="paid-tag">💰 оплатил</span>}
+      <div className="section-title">Гости — можно добавить, даже если сами не идёте</div>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <input type="text" placeholder="Имя гостя" value={guestName} onChange={e => setGuestName(e.target.value)} />
+        <button className="btn-ghost" onClick={() => { addGuest(guestName); setGuestName('') }}><UserPlus size={16} /> Добавить</button>
+      </div>
+
+      <div className="section-title">Идут ({goingEntries.length}{guests.length ? ` + ${guests.length} гостей` : ''})</div>
+      {goingEntries.length ? goingEntries.map(([name, v]) => (
+        <div className="person" key={name}>
+          <span className="person-name">
+            <Check size={14} className="icon-go" /> {name}
+            {priorityNames.has(name) && <Star size={13} className="icon-star" />}
+            {!state.isOpen && v.selfPaid && <span className="paid-tag"><Banknote size={12} /> оплатил</span>}
+          </span>
+          <span className="pm-row">
+            {!state.isOpen && (
+              <button className="link" onClick={() => toggleSelfPaid(name)}>{v.selfPaid ? 'Снять оплату' : 'Отметить оплату'}</button>
+            )}
+            <button className="icon-btn-ghost" title={priorityNames.has(name) ? 'снять приоритет' : 'дать приоритет'} onClick={() => togglePriority(name)}>
+              {priorityNames.has(name) ? <StarOff size={14} /> : <Star size={14} />}
+            </button>
+          </span>
+        </div>
+      )) : <div className="empty">Пока никто не отметился</div>}
+
+      {guests.map(g => (
+        <div className="person guest-tag" key={g.id}>
+          <span className="person-name">
+            <Users size={13} /> {g.name} <span className="empty inline-empty">— гость от {g.addedBy}</span>
+            {!state.isOpen && g.paid && <span className="paid-tag"><Banknote size={12} /> оплачено</span>}
+          </span>
+          <span className="pm-row">
+            {!state.isOpen && <button className="link" onClick={() => toggleGuestPaid(g.id)}>{g.paid ? 'Снять' : 'Оплачено'}</button>}
+            <button className="icon-btn-ghost" onClick={() => removeGuest(g.id)}><Trash2 size={14} /></button>
+          </span>
+        </div>
+      ))}
+
+      <div className="section-title">Не идут ({notEntries.length})</div>
+      {notEntries.length ? notEntries.map(([name, v]) => (
+        <div key={name}>
+          <div className="person">
+            <span className="person-name"><X size={14} className="icon-no" /> {name} {priorityNames.has(name) && <Star size={13} className="icon-star" />}</span>
+          </div>
+          {priorityNames.has(name) && (
+            <div className="person guest-tag substitute-row">
+              <span className="person-name">
+                <Repeat size={13} /> Замена ({price}₽):
+                <select value={v.replacedBy || ''} onChange={e => setSubstitute(name, e.target.value)}>
+                  <option value="">не выбрана</option>
+                  {availableForSubstitution.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
               </span>
-              {!state.isOpen && (
-                <button className="link" onClick={() => toggleSelfPaid(name)}>
-                  {v.selfPaid ? 'Снять оплату' : 'Отметить оплату'}
+              {v.replacedBy && (
+                <button className="link" onClick={() => toggleSettled(name)}>
+                  {v.settled ? `✓ ${v.replacedBy} перевёл ${price}₽` : `отметить: ${v.replacedBy} перевёл ${price}₽`}
                 </button>
               )}
             </div>
-            {v.plusOne > 0 && (
-              <div className="person guest-tag">
-                <span>
-                  +{v.plusOne} гостей {!state.isOpen && v.guestsPaid > 0 && `(оплачено ${v.guestsPaid}/${v.plusOne})`}
-                </span>
-                {!state.isOpen && (
-                  <span className="pm-row">
-                    <button className="btn-ghost" onClick={() => payGuest(name, -1)}>−</button>
-                    <button className="btn-ghost" onClick={() => payGuest(name, 1)}>+</button>
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        ))
-      ) : (
-        <div className="empty">Пока никто не отметился</div>
-      )}
-
-      <div className="section-title">Не идут ({notEntries.length})</div>
-      {notEntries.length ? notEntries.map(n => <div className="person" key={n}>❌ {n}</div>) : <div className="empty">—</div>}
+          )}
+        </div>
+      )) : <div className="empty">—</div>}
 
       <div className="section-title">Думают ({thinkEntries.length})</div>
-      {thinkEntries.length ? thinkEntries.map(n => <div className="person" key={n}>🤔 {n}</div>) : <div className="empty">—</div>}
+      {thinkEntries.length ? thinkEntries.map(n => <div className="person" key={n}><HelpCircle size={14} className="icon-think" /> {n}</div>) : <div className="empty">—</div>}
 
       <div className="stats">
         <div className="stat"><b>{totalGoing}</b>всего идут</div>
@@ -325,10 +547,28 @@ function Board({ state, myName, vote, changeGuests, toggleSelfPaid, payGuest, to
 
       <div className="footer-actions">
         <button className="btn-ghost" onClick={toggleOpen}>
-          {state.isOpen ? '🔒 Закрыть сбор' : '🔓 Открыть сбор'}
+          {state.isOpen ? <Lock size={16} /> : <Unlock size={16} />} {state.isOpen ? 'Закрыть сбор' : 'Открыть сбор'}
         </button>
-        <button className="link" onClick={resetEvent}>Начать новый сбор</button>
+        <button className="link" onClick={resetEvent}><RefreshCw size={13} /> Начать новый сбор</button>
       </div>
     </div>
+  )
+}
+
+function EditableText({ value, onSave }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value)
+
+  if (!editing) {
+    return <span className="editable-text" onClick={() => { setDraft(value); setEditing(true) }}>{value}</span>
+  }
+  return (
+    <input
+      type="text" autoFocus value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { setEditing(false); if (draft.trim() && draft !== value) onSave(draft.trim()) }}
+      onKeyDown={e => { if (e.key === 'Enter') e.target.blur() }}
+      className="editable-input"
+    />
   )
 }
