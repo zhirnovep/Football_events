@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
-  Check, X, HelpCircle, Star, StarOff, Trash2, MapPin, Clock,
+  Check, X, HelpCircle, Star, StarOff, Trash2, Clock,
   CalendarDays, Lock, Unlock, Plus, Minus, RefreshCw, Wallet,
-  UserPlus, Users, Repeat, Banknote
+  UserPlus, Users, Repeat, Banknote, Crown, Vote
 } from 'lucide-react'
 import { supabase } from './supabaseClient'
 import BallIcon from './BallIcon'
@@ -10,7 +10,7 @@ import BallIcon from './BallIcon'
 const EVENT_ROW_ID = 1
 const SEASON_ROW_ID = 1
 const STORAGE_KEY = 'football_my_name'
-const GAME_PRICE = 350
+const SUB_PRICE = 350
 const DEFAULT_LOCATION = 'Северный'
 
 function emptyEvent(fields) {
@@ -30,7 +30,7 @@ function emptyEvent(fields) {
 }
 
 function emptySeason() {
-  return { pricePerGame: GAME_PRICE, remainingGames: 0, upcomingDates: [] }
+  return { pricePerGame: SUB_PRICE, remainingGames: 0, upcomingDates: [] }
 }
 
 function formatDuration(start, end) {
@@ -60,22 +60,21 @@ export default function App() {
   const [state, setState] = useState(null)
   const [season, setSeason] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [tab, setTab] = useState('vote')
 
   const loadRoster = useCallback(async () => {
-    const { data, error } = await supabase.from('roster').select('name, is_priority').order('name')
+    const { data, error } = await supabase.from('roster').select('name, is_priority, is_king, phone, bank').order('name')
     if (!error && data) setRoster(data)
   }, [])
 
   const loadEvent = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('event_state').select('data').eq('id', EVENT_ROW_ID).maybeSingle()
+    const { data, error } = await supabase.from('event_state').select('data').eq('id', EVENT_ROW_ID).maybeSingle()
     if (!error) setState(data ? data.data : null)
     setLoading(false)
   }, [])
 
   const loadSeason = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('season_state').select('data').eq('id', SEASON_ROW_ID).maybeSingle()
+    const { data, error } = await supabase.from('season_state').select('data').eq('id', SEASON_ROW_ID).maybeSingle()
     if (!error) setSeason(data ? data.data : emptySeason())
   }, [])
 
@@ -133,6 +132,17 @@ export default function App() {
     loadRoster()
   }
 
+  const setKing = async name => {
+    await supabase.from('roster').update({ is_king: false }).eq('is_king', true)
+    if (name) await supabase.from('roster').update({ is_king: true }).eq('name', name)
+    loadRoster()
+  }
+
+  const updateContact = async (name, field, value) => {
+    await supabase.from('roster').update({ [field]: value }).eq('name', name)
+    loadRoster()
+  }
+
   const createEvent = async fields => { await saveState(emptyEvent(fields)) }
 
   const resetEvent = async () => {
@@ -145,16 +155,16 @@ export default function App() {
     if (!myName) return
     const next = structuredClone(state)
     delete next.notGoing[myName]; delete next.thinking[myName]; delete next.going[myName]
-    if (kind === 'go') next.going[myName] = { selfPaid: false }
-    if (kind === 'notgo') next.notGoing[myName] = { replacedBy: null, settled: false }
+    if (kind === 'go') next.going[myName] = { kingPaid: false }
+    if (kind === 'notgo') next.notGoing[myName] = { settled: false }
     if (kind === 'think') next.thinking[myName] = true
     await saveState(next)
   }
 
-  const toggleSelfPaid = async name => {
+  const toggleKingPaid = async name => {
     const next = structuredClone(state)
     if (!next.going[name]) return
-    next.going[name].selfPaid = !next.going[name].selfPaid
+    next.going[name].kingPaid = !next.going[name].kingPaid
     await saveState(next)
   }
 
@@ -163,7 +173,7 @@ export default function App() {
     if (!trimmed || !myName) return
     const next = structuredClone(state)
     next.guests = next.guests || []
-    next.guests.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: trimmed, addedBy: myName, paid: false })
+    next.guests.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: trimmed, addedBy: myName, kingPaid: false })
     await saveState(next)
   }
 
@@ -173,23 +183,15 @@ export default function App() {
     await saveState(next)
   }
 
-  const toggleGuestPaid = async id => {
+  const toggleGuestKingPaid = async id => {
     const next = structuredClone(state)
     const g = (next.guests || []).find(g => g.id === id)
     if (!g) return
-    g.paid = !g.paid
+    g.kingPaid = !g.kingPaid
     await saveState(next)
   }
 
-  const setSubstitute = async (priorityName, substituteName) => {
-    const next = structuredClone(state)
-    if (!next.notGoing[priorityName]) return
-    next.notGoing[priorityName].replacedBy = substituteName || null
-    next.notGoing[priorityName].settled = false
-    await saveState(next)
-  }
-
-  const toggleSettled = async priorityName => {
+  const toggleSubSettled = async priorityName => {
     const next = structuredClone(state)
     if (!next.notGoing[priorityName]) return
     next.notGoing[priorityName].settled = !next.notGoing[priorityName].settled
@@ -254,34 +256,52 @@ export default function App() {
         <>
           <Whoami name={myName} onSwitch={switchUser} />
 
-          <SeasonCard
-            season={season}
-            adjustRemainingGames={adjustRemainingGames}
-            addUpcomingDate={addUpcomingDate}
-            removeUpcomingDate={removeUpcomingDate}
-            createEventFromDate={createEventFromDate}
-            hasActiveEvent={!!state}
-          />
+          <div className="tabs">
+            <button className={`tab ${tab === 'vote' ? 'tab-active' : ''}`} onClick={() => setTab('vote')}>
+              <Vote size={15} /> Голосование
+            </button>
+            <button className={`tab ${tab === 'season' ? 'tab-active' : ''}`} onClick={() => setTab('season')}>
+              <CalendarDays size={15} /> Будущие игры
+            </button>
+            <button className={`tab ${tab === 'priority' ? 'tab-active' : ''}`} onClick={() => setTab('priority')}>
+              <Star size={15} /> Приоритет
+            </button>
+          </div>
 
-          {!state ? (
-            <Setup onCreate={createEvent} />
-          ) : (
-            <Board
-              state={state}
-              myName={myName}
-              roster={roster}
-              vote={vote}
-              toggleSelfPaid={toggleSelfPaid}
-              addGuest={addGuest}
-              removeGuest={removeGuest}
-              toggleGuestPaid={toggleGuestPaid}
-              setSubstitute={setSubstitute}
-              toggleSettled={toggleSettled}
-              toggleOpen={toggleOpen}
-              resetEvent={resetEvent}
-              updateEventField={updateEventField}
-              togglePriority={togglePriority}
+          {tab === 'vote' && (
+            !state ? (
+              <Setup onCreate={createEvent} />
+            ) : (
+              <Board
+                state={state}
+                myName={myName}
+                roster={roster}
+                vote={vote}
+                toggleKingPaid={toggleKingPaid}
+                addGuest={addGuest}
+                removeGuest={removeGuest}
+                toggleGuestKingPaid={toggleGuestKingPaid}
+                toggleSubSettled={toggleSubSettled}
+                toggleOpen={toggleOpen}
+                resetEvent={resetEvent}
+                updateEventField={updateEventField}
+              />
+            )
+          )}
+
+          {tab === 'season' && (
+            <SeasonCard
+              season={season}
+              adjustRemainingGames={adjustRemainingGames}
+              addUpcomingDate={addUpcomingDate}
+              removeUpcomingDate={removeUpcomingDate}
+              createEventFromDate={createEventFromDate}
+              hasActiveEvent={!!state}
             />
+          )}
+
+          {tab === 'priority' && (
+            <PriorityTab roster={roster} togglePriority={togglePriority} setKing={setKing} updateContact={updateContact} />
           )}
         </>
       )}
@@ -305,9 +325,7 @@ function NameGate({ roster, newRosterName, setNewRosterName, onPick }) {
       <label style={{ marginTop: 16 }}>Не нашли себя? Добавьтесь в список</label>
       <div className="row">
         <input type="text" placeholder="Ваше имя" value={newRosterName} onChange={e => setNewRosterName(e.target.value)} />
-        <button className="btn-primary" onClick={() => onPick(newRosterName)}>
-          <UserPlus size={16} /> Это я
-        </button>
+        <button className="btn-primary" onClick={() => onPick(newRosterName)}><UserPlus size={16} /> Это я</button>
       </div>
       <div className="empty" style={{ marginTop: 10 }}>
         Это устройство запомнит ваш выбор — при следующем заходе по этой же ссылке вводить имя не придётся.
@@ -336,15 +354,13 @@ function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcom
     <div className="card season-card">
       <div className="section-title icon-title" style={{ marginTop: 0 }}><Wallet size={15} /> Абонемент</div>
       <div className="row" style={{ alignItems: 'center', marginBottom: 6 }}>
-        <div className="stat" style={{ flex: 'none' }}>
-          <b>{season.remainingGames || 0}</b>оплаченных игр осталось
-        </div>
+        <div className="stat" style={{ flex: 'none' }}><b>{season.remainingGames || 0}</b>оплаченных игр осталось</div>
         <span className="pm-row">
           <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(-1)}><Minus size={16} /></button>
           <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(1)}><Plus size={16} /></button>
         </span>
       </div>
-      <div className="empty" style={{ marginBottom: 10 }}>Цена одной игры: {season.pricePerGame || GAME_PRICE} ₽ (для расчёта замен)</div>
+      <div className="empty" style={{ marginBottom: 10 }}>Доля одного приоритетного игрока за игру: {SUB_PRICE} ₽</div>
 
       <div className="section-title icon-title"><CalendarDays size={15} /> Ближайшие даты</div>
       {dates.length ? dates.map(d => (
@@ -388,6 +404,78 @@ function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcom
   )
 }
 
+function PriorityTab({ roster, togglePriority, setKing, updateContact }) {
+  const priorityMembers = roster.filter(r => r.is_priority)
+  const king = roster.find(r => r.is_king)
+
+  return (
+    <>
+      <div className="card">
+        <div className="section-title icon-title" style={{ marginTop: 0 }}><Crown size={15} /> Король (принимает оплату за аренду)</div>
+        <div className="empty" style={{ marginBottom: 10 }}>Тот, кто собирает деньги со всех и платит за зал/доп. время.</div>
+        <div className="rosterList" style={{ marginBottom: 10 }}>
+          {roster.map(r => (
+            <button
+              key={r.name}
+              className={`btn-ghost rosterBtn ${r.is_king ? 'active' : ''}`}
+              onClick={() => setKing(r.is_king ? null : r.name)}
+            >
+              {r.is_king && <Crown size={13} className="icon-king" />} {r.name}
+            </button>
+          ))}
+        </div>
+        {king && (
+          <ContactFields person={king} onChange={(field, value) => updateContact(king.name, field, value)} />
+        )}
+      </div>
+
+      <div className="card">
+        <div className="section-title icon-title" style={{ marginTop: 0 }}><Star size={15} /> Приоритетные игроки</div>
+        <div className="empty" style={{ marginBottom: 10 }}>
+          Те, кто скинулся заранее (1400₽/мес) — у них приоритет на место. Если такой человек не идёт, замена переводит ему {SUB_PRICE}₽ напрямую.
+        </div>
+        <div className="rosterList" style={{ marginBottom: 14 }}>
+          {roster.map(r => (
+            <button
+              key={r.name}
+              className={`btn-ghost rosterBtn ${r.is_priority ? 'active' : ''}`}
+              onClick={() => togglePriority(r.name)}
+            >
+              {r.is_priority ? <Star size={13} className="icon-star" /> : <StarOff size={13} />} {r.name}
+            </button>
+          ))}
+        </div>
+        {priorityMembers.length > 0 && (
+          <>
+            <div className="section-title">Реквизиты для переводов</div>
+            {priorityMembers.map(p => (
+              <div key={p.name} className="contact-block">
+                <div className="person-name" style={{ marginBottom: 6 }}><Star size={13} className="icon-star" /> {p.name}</div>
+                <ContactFields person={p} onChange={(field, value) => updateContact(p.name, field, value)} />
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </>
+  )
+}
+
+function ContactFields({ person, onChange }) {
+  return (
+    <div className="row">
+      <div style={{ flex: 1 }}>
+        <label>Номер телефона</label>
+        <input type="text" placeholder="+7 900 000-00-00" defaultValue={person.phone || ''} onBlur={e => onChange('phone', e.target.value)} />
+      </div>
+      <div style={{ flex: 1 }}>
+        <label>Банк</label>
+        <input type="text" placeholder="Т-Банк" defaultValue={person.bank || ''} onBlur={e => onChange('bank', e.target.value)} />
+      </div>
+    </div>
+  )
+}
+
 function Setup({ onCreate }) {
   const [location, setLocation] = useState(DEFAULT_LOCATION)
   const [venueType, setVenueType] = useState('зал')
@@ -419,9 +507,10 @@ function Setup({ onCreate }) {
   )
 }
 
-function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGuest, toggleGuestPaid, setSubstitute, toggleSettled, toggleOpen, resetEvent, updateEventField, togglePriority }) {
+function Board({ state, myName, roster, vote, toggleKingPaid, addGuest, removeGuest, toggleGuestKingPaid, toggleSubSettled, toggleOpen, resetEvent, updateEventField }) {
   const [guestName, setGuestName] = useState('')
   const priorityNames = new Set(roster.filter(r => r.is_priority).map(r => r.name))
+  const king = roster.find(r => r.is_king)
 
   const goingEntries = Object.entries(state.going || {})
   const notEntries = Object.entries(state.notGoing || {})
@@ -429,15 +518,21 @@ function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGu
   const guests = state.guests || []
 
   const totalGoing = goingEntries.length + guests.length
-  const price = 350
 
-  let totalPaid = 0
+  // Auto-match: priority members who are absent <-> non-priority members who are going, in order
+  const absentPriority = notEntries.filter(([name]) => priorityNames.has(name))
+  const nonPriorityGoing = goingEntries.filter(([name]) => !priorityNames.has(name)).map(([name]) => name)
+  const matches = absentPriority.map(([name, v], i) => ({
+    priorityName: name,
+    substitute: nonPriorityGoing[i] || null,
+    settled: v.settled
+  }))
+
+  let kingPaidCount = 0
   if (!state.isOpen) {
-    goingEntries.forEach(([, v]) => { if (v.selfPaid) totalPaid += 1 })
-    guests.forEach(g => { if (g.paid) totalPaid += 1 })
+    goingEntries.forEach(([, v]) => { if (v.kingPaid) kingPaidCount += 1 })
+    guests.forEach(g => { if (g.kingPaid) kingPaidCount += 1 })
   }
-
-  const availableForSubstitution = goingEntries.map(([n]) => n)
 
   return (
     <div className="card">
@@ -486,16 +581,11 @@ function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGu
           <span className="person-name">
             <Check size={14} className="icon-go" /> {name}
             {priorityNames.has(name) && <Star size={13} className="icon-star" />}
-            {!state.isOpen && v.selfPaid && <span className="paid-tag"><Banknote size={12} /> оплатил</span>}
+            {!state.isOpen && v.kingPaid && <span className="paid-tag"><Banknote size={12} /> оплатил Королю</span>}
           </span>
-          <span className="pm-row">
-            {!state.isOpen && (
-              <button className="link" onClick={() => toggleSelfPaid(name)}>{v.selfPaid ? 'Снять оплату' : 'Отметить оплату'}</button>
-            )}
-            <button className="icon-btn-ghost" title={priorityNames.has(name) ? 'снять приоритет' : 'дать приоритет'} onClick={() => togglePriority(name)}>
-              {priorityNames.has(name) ? <StarOff size={14} /> : <Star size={14} />}
-            </button>
-          </span>
+          {!state.isOpen && (
+            <button className="link" onClick={() => toggleKingPaid(name)}>{v.kingPaid ? 'Снять' : 'Оплатил Королю'}</button>
+          )}
         </div>
       )) : <div className="empty">Пока никто не отметился</div>}
 
@@ -503,46 +593,63 @@ function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGu
         <div className="person guest-tag" key={g.id}>
           <span className="person-name">
             <Users size={13} /> {g.name} <span className="empty inline-empty">— гость от {g.addedBy}</span>
-            {!state.isOpen && g.paid && <span className="paid-tag"><Banknote size={12} /> оплачено</span>}
+            {!state.isOpen && g.kingPaid && <span className="paid-tag"><Banknote size={12} /> оплатил Королю</span>}
           </span>
           <span className="pm-row">
-            {!state.isOpen && <button className="link" onClick={() => toggleGuestPaid(g.id)}>{g.paid ? 'Снять' : 'Оплачено'}</button>}
+            {!state.isOpen && <button className="link" onClick={() => toggleGuestKingPaid(g.id)}>{g.kingPaid ? 'Снять' : 'Оплатил'}</button>}
             <button className="icon-btn-ghost" onClick={() => removeGuest(g.id)}><Trash2 size={14} /></button>
           </span>
         </div>
       ))}
 
       <div className="section-title">Не идут ({notEntries.length})</div>
-      {notEntries.length ? notEntries.map(([name, v]) => (
-        <div key={name}>
-          <div className="person">
-            <span className="person-name"><X size={14} className="icon-no" /> {name} {priorityNames.has(name) && <Star size={13} className="icon-star" />}</span>
-          </div>
-          {priorityNames.has(name) && (
-            <div className="person guest-tag substitute-row">
-              <span className="person-name">
-                <Repeat size={13} /> Замена ({price}₽):
-                <select value={v.replacedBy || ''} onChange={e => setSubstitute(name, e.target.value)}>
-                  <option value="">не выбрана</option>
-                  {availableForSubstitution.map(n => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </span>
-              {v.replacedBy && (
-                <button className="link" onClick={() => toggleSettled(name)}>
-                  {v.settled ? `✓ ${v.replacedBy} перевёл ${price}₽` : `отметить: ${v.replacedBy} перевёл ${price}₽`}
-                </button>
-              )}
-            </div>
-          )}
+      {notEntries.length ? notEntries.map(([name]) => (
+        <div className="person" key={name}>
+          <span className="person-name"><X size={14} className="icon-no" /> {name} {priorityNames.has(name) && <Star size={13} className="icon-star" />}</span>
         </div>
       )) : <div className="empty">—</div>}
 
       <div className="section-title">Думают ({thinkEntries.length})</div>
       {thinkEntries.length ? thinkEntries.map(n => <div className="person" key={n}><HelpCircle size={14} className="icon-think" /> {n}</div>) : <div className="empty">—</div>}
 
+      {matches.length > 0 && (
+        <>
+          <div className="section-title icon-title"><Repeat size={15} /> Переводы приоритетным (350₽)</div>
+          {matches.map(m => (
+            <div className="person guest-tag substitute-row" key={m.priorityName}>
+              <span className="person-name">
+                {m.substitute ? (
+                  <>👉 {m.substitute} переводит {m.priorityName}</>
+                ) : (
+                  <>⏳ замена на место {m.priorityName} ещё не нашлась</>
+                )}
+              </span>
+              {m.substitute && (
+                <button className="link" onClick={() => toggleSubSettled(m.priorityName)}>
+                  {m.settled ? '✓ переведено' : 'отметить переведённым'}
+                </button>
+              )}
+            </div>
+          ))}
+          {matches.some(m => m.substitute) && (
+            <PriorityContactHint roster={roster} matches={matches} priorityNames={priorityNames} />
+          )}
+        </>
+      )}
+
+      <div className="section-title icon-title"><Crown size={15} /> Король</div>
+      {king ? (
+        <div className="empty">
+          {king.name}{king.phone ? ` · ${king.phone}` : ''}{king.bank ? ` · ${king.bank}` : ''}
+          {!king.phone && !king.bank && ' — реквизиты не заполнены (вкладка «Приоритет»)'}
+        </div>
+      ) : (
+        <div className="empty">Не назначен — выберите во вкладке «Приоритет»</div>
+      )}
+
       <div className="stats">
         <div className="stat"><b>{totalGoing}</b>всего идут</div>
-        {!state.isOpen && <div className="stat"><b>{totalPaid}</b>оплатили</div>}
+        {!state.isOpen && <div className="stat"><b>{kingPaidCount}</b>оплатили Королю</div>}
       </div>
 
       <div className="footer-actions">
@@ -551,6 +658,19 @@ function Board({ state, myName, roster, vote, toggleSelfPaid, addGuest, removeGu
         </button>
         <button className="link" onClick={resetEvent}><RefreshCw size={13} /> Начать новый сбор</button>
       </div>
+    </div>
+  )
+}
+
+function PriorityContactHint({ roster, matches, priorityNames }) {
+  const relevant = matches.filter(m => m.substitute)
+  return (
+    <div className="empty" style={{ marginTop: -2, marginBottom: 8 }}>
+      {relevant.map(m => {
+        const p = roster.find(r => r.name === m.priorityName)
+        if (!p || (!p.phone && !p.bank)) return null
+        return <div key={m.priorityName}>{m.priorityName}: {p.phone || '—'} {p.bank ? `· ${p.bank}` : ''}</div>
+      })}
     </div>
   )
 }
