@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-  Check, X, HelpCircle, Star, Trash2, Clock, Copy, CopyCheck,
-  CalendarDays, Lock, Unlock, Plus, Minus, RefreshCw, Wallet,
-  UserPlus, Users, Repeat, Banknote, ShieldCheck, Vote
+  Check, X, HelpCircle, Star, Trash2, Clock, Copy, CopyCheck, Crown,
+  CalendarDays, Lock, Unlock, Plus, RefreshCw,
+  UserPlus, Users, Banknote, Vote
 } from 'lucide-react'
 import { supabase } from './supabaseClient'
 import BallIcon from './BallIcon'
@@ -30,7 +30,7 @@ function emptyEvent(fields) {
 }
 
 function emptySeason() {
-  return { pricePerGame: SUB_PRICE, remainingGames: 0, upcomingDates: [] }
+  return { upcomingDates: [] }
 }
 
 function formatDuration(start, end) {
@@ -64,7 +64,6 @@ function todayStr() {
 export default function App() {
   const [myName, setMyName] = useState(() => localStorage.getItem(STORAGE_KEY) || '')
   const [roster, setRoster] = useState([])
-  const [newRosterName, setNewRosterName] = useState('')
   const [state, setState] = useState(null)
   const [season, setSeason] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -149,18 +148,24 @@ export default function App() {
   const togglePriority = async name => {
     const r = roster.find(r => r.name === name)
     if (!r) return
-    await supabase.from('roster').update({ is_priority: !r.is_priority }).eq('name', name)
+    const { error } = await supabase.from('roster').update({ is_priority: !r.is_priority }).eq('name', name)
+    if (error) alert('Не удалось сохранить: ' + error.message)
     loadRoster()
   }
 
   const setAdmin = async name => {
-    await supabase.from('roster').update({ is_king: false }).eq('is_king', true)
-    if (name) await supabase.from('roster').update({ is_king: true }).eq('name', name)
+    const { error: e1 } = await supabase.from('roster').update({ is_king: false }).eq('is_king', true)
+    if (e1) alert('Не удалось сохранить: ' + e1.message)
+    if (name) {
+      const { error: e2 } = await supabase.from('roster').update({ is_king: true }).eq('name', name)
+      if (e2) alert('Не удалось сохранить: ' + e2.message)
+    }
     loadRoster()
   }
 
   const updateContact = async (name, field, value) => {
-    await supabase.from('roster').update({ [field]: value }).eq('name', name)
+    const { error } = await supabase.from('roster').update({ [field]: value }).eq('name', name)
+    if (error) alert('Не удалось сохранить: ' + error.message)
     loadRoster()
   }
 
@@ -224,12 +229,6 @@ export default function App() {
     await saveState(next)
   }
 
-  const adjustRemainingGames = async delta => {
-    const next = structuredClone(season)
-    next.remainingGames = Math.max(0, (next.remainingGames || 0) + delta)
-    await saveSeason(next)
-  }
-
   const addUpcomingDate = async dateFields => {
     const next = structuredClone(season)
     next.upcomingDates = next.upcomingDates || []
@@ -247,9 +246,6 @@ export default function App() {
   const createEventFromDate = async d => {
     await createEvent({ location: d.location, venueType: d.venueType, date: d.date, startTime: d.startTime, endTime: d.endTime })
     await removeUpcomingDate(d.id)
-    const next = structuredClone(season)
-    next.remainingGames = Math.max(0, (next.remainingGames || 0) - 1)
-    await saveSeason(next)
   }
 
   if (loading) return <div className="wrap"><p className="empty">Загрузка…</p></div>
@@ -265,7 +261,7 @@ export default function App() {
       </div>
 
       {!myName ? (
-        <NameGate roster={roster} newRosterName={newRosterName} setNewRosterName={setNewRosterName} onPick={pickName} />
+        <NameGate roster={roster} onPick={pickName} />
       ) : (
         <>
           <Whoami name={myName} onSwitch={switchUser} />
@@ -305,7 +301,6 @@ export default function App() {
           {tab === 'season' && (
             <SeasonCard
               season={season}
-              adjustRemainingGames={adjustRemainingGames}
               addUpcomingDate={addUpcomingDate}
               removeUpcomingDate={removeUpcomingDate}
               createEventFromDate={createEventFromDate}
@@ -322,23 +317,45 @@ export default function App() {
   )
 }
 
-function NameGate({ roster, newRosterName, setNewRosterName, onPick }) {
+function NameGate({ roster, onPick }) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const blurTimer = useRef(null)
+
+  const q = query.trim().toLowerCase()
+  const filtered = q ? roster.filter(r => r.name.toLowerCase().includes(q)) : roster
+  const exactMatch = roster.some(r => r.name.toLowerCase() === q)
+
+  const handleBlur = () => { blurTimer.current = setTimeout(() => setOpen(false), 150) }
+  const handleFocus = () => { clearTimeout(blurTimer.current); setOpen(true) }
+
   return (
     <div className="card">
       <label>Вы кто из списка?</label>
-      {roster.length > 0 && (
-        <div className="rosterList">
-          {roster.map(r => (
-            <button key={r.name} className="btn-ghost rosterBtn" onClick={() => onPick(r.name)}>
-              {r.is_priority && <Star size={14} className="icon-star" />} {r.name}
-            </button>
-          ))}
-        </div>
-      )}
-      <label style={{ marginTop: 16 }}>Не нашли себя? Добавьтесь в список</label>
-      <div className="row">
-        <input type="text" placeholder="Ваше имя" value={newRosterName} onChange={e => setNewRosterName(e.target.value)} />
-        <button className="btn-primary" onClick={() => onPick(newRosterName)}><UserPlus size={16} /> Это я</button>
+      <div className="combobox">
+        <input
+          type="text"
+          placeholder="Начните вводить имя…"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+        />
+        {open && (
+          <div className="suggest-list">
+            {filtered.slice(0, 40).map(r => (
+              <button key={r.name} className="suggest-item" onMouseDown={() => onPick(r.name)}>
+                {r.is_priority && <Star size={13} className="icon-star" />} {r.name}
+              </button>
+            ))}
+            {q && !exactMatch && (
+              <button className="suggest-item suggest-new" onMouseDown={() => onPick(query)}>
+                <UserPlus size={14} /> Добавить «{query}» как нового игрока
+              </button>
+            )}
+            {!filtered.length && !q && <div className="empty" style={{ padding: '8px 10px' }}>Список пуст</div>}
+          </div>
+        )}
       </div>
       <div className="empty" style={{ marginTop: 10 }}>
         Это устройство запомнит ваш выбор — при следующем заходе по этой же ссылке вводить имя не придётся.
@@ -369,7 +386,7 @@ function CopyButton({ value }) {
           setCopied(true)
           setTimeout(() => setCopied(false), 1500)
         } catch {
-          // clipboard may be unavailable, ignore
+          // clipboard unavailable, ignore
         }
       }}
     >
@@ -378,7 +395,7 @@ function CopyButton({ value }) {
   )
 }
 
-function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcomingDate, createEventFromDate, hasActiveEvent }) {
+function SeasonCard({ season, addUpcomingDate, removeUpcomingDate, createEventFromDate, hasActiveEvent }) {
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({ date: '', startTime: '19:30', endTime: '20:30', location: DEFAULT_LOCATION, venueType: 'зал' })
 
@@ -387,18 +404,12 @@ function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcom
 
   return (
     <div className="card season-card">
-      <div className="section-title icon-title" style={{ marginTop: 0 }}><Wallet size={15} /> Абонемент</div>
-      <div className="row" style={{ alignItems: 'center', marginBottom: 6 }}>
-        <div className="stat" style={{ flex: 'none' }}><b>{season.remainingGames || 0}</b>оплаченных игр осталось</div>
-        <span className="pm-row">
-          <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(-1)}><Minus size={16} /></button>
-          <button className="btn-ghost icon-btn" onClick={() => adjustRemainingGames(1)}><Plus size={16} /></button>
-        </span>
+      <div className="section-title icon-title" style={{ marginTop: 0 }}><CalendarDays size={15} /> Абонемент — оплаченные игры</div>
+      <div className="stat" style={{ marginBottom: 10 }}><b>{dates.length}</b>игр в графике</div>
+      <div className="empty" style={{ marginBottom: 12 }}>
+        Количество = число дат ниже. Прошедшие даты пропадают сами, и число уменьшается.
       </div>
-      <div className="empty" style={{ marginBottom: 10 }}>Доля одного приоритетного игрока за игру: {SUB_PRICE} ₽</div>
 
-      <div className="section-title icon-title"><CalendarDays size={15} /> Ближайшие даты</div>
-      <div className="empty" style={{ marginTop: -4, marginBottom: 8 }}>Прошедшие даты пропадают отсюда сами</div>
       {dates.length ? dates.map(d => (
         <div className="person" key={d.id}>
           <span>{formatDateLabel(d.date)}, {d.startTime}–{d.endTime} · {d.location} ({d.venueType})</span>
@@ -443,77 +454,49 @@ function SeasonCard({ season, adjustRemainingGames, addUpcomingDate, removeUpcom
 function PriorityTab({ roster, togglePriority, setAdmin, updateContact }) {
   const priorityMembers = roster.filter(r => r.is_priority)
   const nonPriority = roster.filter(r => !r.is_priority)
-  const admin = roster.find(r => r.is_king)
   const [addSelect, setAddSelect] = useState('')
 
   return (
-    <>
-      <div className="card">
-        <div className="section-title icon-title" style={{ marginTop: 0 }}><ShieldCheck size={15} /> Админ</div>
-        <div className="empty" style={{ marginBottom: 10 }}>Собирает деньги со всех и платит за зал / доп. время.</div>
-        <div className="row">
-          <select style={{ flex: 1 }} value={admin?.name || ''} onChange={e => setAdmin(e.target.value || null)}>
-            <option value="">— не назначен —</option>
-            {roster.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
-          </select>
-          {admin && <button className="btn-ghost" onClick={() => setAdmin(null)}>Снять</button>}
-        </div>
-        {admin && (
-          <div style={{ marginTop: 12 }}>
-            <ContactFields person={admin} onChange={(field, value) => updateContact(admin.name, field, value)} />
-          </div>
-        )}
+    <div className="card">
+      <div className="section-title icon-title" style={{ marginTop: 0 }}><Star size={15} /> Приоритетные игроки</div>
+      <div className="empty" style={{ marginBottom: 10 }}>
+        Скинулись заранее (1400₽/мес) — первый в очереди из обычных переводит {SUB_PRICE}₽ тому, кто не пришёл. Корона — кто собирает деньги за зал (админ).
       </div>
 
-      <div className="card">
-        <div className="section-title icon-title" style={{ marginTop: 0 }}><Star size={15} /> Приоритетные игроки</div>
-        <div className="empty" style={{ marginBottom: 10 }}>
-          Скинулись заранее (1400₽/мес). Если такой человек не идёт — первый в очереди из обычных переводит ему {SUB_PRICE}₽.
-        </div>
-
-        {priorityMembers.length > 0 ? (
-          <div className="priority-table">
-            <div className="priority-row priority-head">
-              <span>Игрок</span><span>Номер</span><span>Банк</span><span />
+      {priorityMembers.length > 0 ? (
+        <div className="priority-table">
+          <div className="priority-row priority-head">
+            <span>Игрок</span><span>Номер</span><span>Банк</span><span>Админ</span><span />
+          </div>
+          {priorityMembers.map(p => (
+            <div className="priority-row" key={p.name}>
+              <span>{p.name}</span>
+              <input type="text" placeholder="+7 900 000-00-00" defaultValue={p.phone || ''} onBlur={e => updateContact(p.name, 'phone', e.target.value)} />
+              <input type="text" placeholder="Т-Банк" defaultValue={p.bank || ''} onBlur={e => updateContact(p.name, 'bank', e.target.value)} />
+              <button
+                className={`icon-btn-ghost ${p.is_king ? 'icon-king-active' : ''}`}
+                title={p.is_king ? 'Снять с админа' : 'Сделать админом'}
+                onClick={() => setAdmin(p.is_king ? null : p.name)}
+              >
+                <Crown size={16} />
+              </button>
+              <button className="icon-btn-ghost" title="Убрать из приоритета" onClick={() => togglePriority(p.name)}><Trash2 size={14} /></button>
             </div>
-            {priorityMembers.map(p => (
-              <div className="priority-row" key={p.name}>
-                <span>{p.name}</span>
-                <input type="text" placeholder="+7 900 000-00-00" defaultValue={p.phone || ''} onBlur={e => updateContact(p.name, 'phone', e.target.value)} />
-                <input type="text" placeholder="Т-Банк" defaultValue={p.bank || ''} onBlur={e => updateContact(p.name, 'bank', e.target.value)} />
-                <button className="icon-btn-ghost" title="Убрать из приоритета" onClick={() => togglePriority(p.name)}><Trash2 size={14} /></button>
-              </div>
-            ))}
-          </div>
-        ) : <div className="empty">Пока никого нет</div>}
+          ))}
+        </div>
+      ) : <div className="empty">Пока никого нет</div>}
 
-        {nonPriority.length > 0 && (
-          <div className="row" style={{ marginTop: 14 }}>
-            <select style={{ flex: 1 }} value={addSelect} onChange={e => setAddSelect(e.target.value)}>
-              <option value="">Выберите игрока…</option>
-              {nonPriority.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
-            </select>
-            <button className="btn-primary" onClick={() => { if (addSelect) { togglePriority(addSelect); setAddSelect('') } }}>
-              <Plus size={16} /> Добавить
-            </button>
-          </div>
-        )}
-      </div>
-    </>
-  )
-}
-
-function ContactFields({ person, onChange }) {
-  return (
-    <div className="row">
-      <div style={{ flex: 1 }}>
-        <label>Номер телефона</label>
-        <input type="text" placeholder="+7 900 000-00-00" defaultValue={person.phone || ''} onBlur={e => onChange('phone', e.target.value)} />
-      </div>
-      <div style={{ flex: 1 }}>
-        <label>Банк</label>
-        <input type="text" placeholder="Т-Банк" defaultValue={person.bank || ''} onBlur={e => onChange('bank', e.target.value)} />
-      </div>
+      {nonPriority.length > 0 && (
+        <div className="row" style={{ marginTop: 14 }}>
+          <select style={{ flex: 1 }} value={addSelect} onChange={e => setAddSelect(e.target.value)}>
+            <option value="">Выберите игрока…</option>
+            {nonPriority.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}
+          </select>
+          <button className="btn-primary" onClick={() => { if (addSelect) { togglePriority(addSelect); setAddSelect('') } }}>
+            <Plus size={16} /> Добавить
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -561,8 +544,8 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
 
   const totalGoing = goingEntries.length + guests.length
 
-  // Auto-match: absent priority members <-> non-priority going members, in order
-  const absentPriority = notEntries.filter(([name]) => priorityNames.has(name)).map(([name]) => name)
+  // Absent = any priority roster member simply not present in "going" (regardless of explicit vote)
+  const absentPriority = roster.filter(r => r.is_priority && !(r.name in (state.going || {}))).map(r => r.name)
   const nonPriorityGoing = goingEntries.filter(([name]) => !priorityNames.has(name)).map(([name]) => name)
   const substituteOf = {} // substituteName -> priorityName
   nonPriorityGoing.forEach((name, i) => { if (absentPriority[i]) substituteOf[name] = absentPriority[i] })
@@ -629,21 +612,19 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
         const isPriority = priorityNames.has(name)
         const recipient = !isPriority && !state.isOpen ? recipientFor(name) : null
         return (
-          <div key={name}>
-            <div className="person">
-              <span className="person-name">
-                <Check size={14} className="icon-go" /> {name}
-                {isPriority && <Star size={13} className="icon-star" />}
-              </span>
-            </div>
+          <div className="person pay-line" key={name}>
+            <span className="person-name">
+              <Check size={14} className="icon-go" /> {name}
+              {isPriority && <Star size={13} className="icon-star" />}
+            </span>
             {recipient && (
-              <div className="person guest-tag pay-row">
+              <span className="pm-row">
                 <button className={`btn-ghost pay-btn ${v.paid ? 'paid-done' : ''}`} onClick={() => togglePaid(name)}>
                   <Banknote size={13} />
                   {v.paid ? 'Оплачено' : 'Оплатить'} {recipient.name}{recipient.amount ? ` · ${recipient.amount}` : ''}{recipient.bank ? ` · ${recipient.bank}` : ''}
                 </button>
                 <CopyButton value={recipient.phone} />
-              </div>
+              </span>
             )}
           </div>
         )
@@ -652,22 +633,22 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
       {guests.map(g => {
         const recipient = !state.isOpen ? (admin ? { name: admin.name, phone: admin.phone, bank: admin.bank } : null) : null
         return (
-          <div key={g.id}>
-            <div className="person guest-tag">
-              <span className="person-name">
-                <Users size={13} /> {g.name} <span className="empty inline-empty">— гость от {g.addedBy}</span>
-              </span>
+          <div className="person pay-line" key={g.id}>
+            <span className="person-name">
+              <Users size={13} /> {g.name} <span className="empty inline-empty">— гость от {g.addedBy}</span>
+            </span>
+            <span className="pm-row">
+              {recipient && (
+                <>
+                  <button className={`btn-ghost pay-btn ${g.paid ? 'paid-done' : ''}`} onClick={() => toggleGuestPaid(g.id)}>
+                    <Banknote size={13} />
+                    {g.paid ? 'Оплачено' : 'Оплатить'} {recipient.name}{recipient.bank ? ` · ${recipient.bank}` : ''}
+                  </button>
+                  <CopyButton value={recipient.phone} />
+                </>
+              )}
               <button className="icon-btn-ghost" onClick={() => removeGuest(g.id)}><Trash2 size={14} /></button>
-            </div>
-            {recipient && (
-              <div className="person guest-tag pay-row">
-                <button className={`btn-ghost pay-btn ${g.paid ? 'paid-done' : ''}`} onClick={() => toggleGuestPaid(g.id)}>
-                  <Banknote size={13} />
-                  {g.paid ? 'Оплачено' : 'Оплатить'} {recipient.name}{recipient.bank ? ` · ${recipient.bank}` : ''}
-                </button>
-                <CopyButton value={recipient.phone} />
-              </div>
-            )}
+            </span>
           </div>
         )
       })}
