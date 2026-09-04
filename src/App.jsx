@@ -181,7 +181,7 @@ export default function App() {
     if (!myName) return
     const next = structuredClone(state)
     delete next.notGoing[myName]; delete next.thinking[myName]; delete next.going[myName]
-    if (kind === 'go') next.going[myName] = { paid: false }
+    if (kind === 'go') next.going[myName] = { paid: false, joinedAt: Date.now() }
     if (kind === 'notgo') next.notGoing[myName] = true
     if (kind === 'think') next.thinking[myName] = true
     await saveState(next)
@@ -199,7 +199,7 @@ export default function App() {
     if (!trimmed || !myName) return
     const next = structuredClone(state)
     next.guests = next.guests || []
-    next.guests.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: trimmed, addedBy: myName, paid: false })
+    next.guests.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: trimmed, addedBy: myName, paid: false, addedAt: Date.now() })
     await saveState(next)
   }
 
@@ -546,9 +546,20 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
 
   // Absent = any priority roster member simply not present in "going" (regardless of explicit vote)
   const absentPriority = roster.filter(r => r.is_priority && !(r.name in (state.going || {}))).map(r => r.name)
-  const nonPriorityGoing = goingEntries.filter(([name]) => !priorityNames.has(name)).map(([name]) => name)
-  const substituteOf = {} // substituteName -> priorityName
-  nonPriorityGoing.forEach((name, i) => { if (absentPriority[i]) substituteOf[name] = absentPriority[i] })
+
+  // Single queue: non-priority going members + guests, ordered by when they joined,
+  // matched in order against absent priority slots. Overflow pays the admin.
+  const queue = [
+    ...goingEntries.filter(([name]) => !priorityNames.has(name)).map(([name, v]) => ({ key: name, ts: v.joinedAt || 0 })),
+    ...guests.map(g => ({ key: g.id, ts: g.addedAt || 0 }))
+  ].sort((a, b) => a.ts - b.ts)
+
+  const assignment = {} // key (name or guest id) -> { type: 'priority', name } | { type: 'admin' }
+  queue.forEach((entry, i) => {
+    assignment[entry.key] = absentPriority[i]
+      ? { type: 'priority', name: absentPriority[i] }
+      : { type: 'admin' }
+  })
 
   let unpaidCount = 0
   if (!state.isOpen) {
@@ -556,11 +567,12 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
     guests.forEach(g => { if (!g.paid) unpaidCount += 1 })
   }
 
-  function recipientFor(name) {
-    const priorityName = substituteOf[name]
-    if (priorityName) {
-      const p = roster.find(r => r.name === priorityName)
-      return { name: priorityName, phone: p?.phone, bank: p?.bank, amount: `${SUB_PRICE}₽` }
+  function recipientFor(key) {
+    const a = assignment[key]
+    if (!a) return null
+    if (a.type === 'priority') {
+      const p = roster.find(r => r.name === a.name)
+      return { name: a.name, phone: p?.phone, bank: p?.bank, amount: `${SUB_PRICE}₽` }
     }
     if (admin) return { name: admin.name, phone: admin.phone, bank: admin.bank, amount: null }
     return null
@@ -631,7 +643,7 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
       }) : <div className="empty">Пока никто не отметился</div>}
 
       {guests.map(g => {
-        const recipient = !state.isOpen ? (admin ? { name: admin.name, phone: admin.phone, bank: admin.bank } : null) : null
+        const recipient = !state.isOpen ? recipientFor(g.id) : null
         return (
           <div className="person pay-line" key={g.id}>
             <span className="person-name">
@@ -642,7 +654,7 @@ function Board({ state, myName, roster, vote, togglePaid, addGuest, removeGuest,
                 <>
                   <button className={`btn-ghost pay-btn ${g.paid ? 'paid-done' : ''}`} onClick={() => toggleGuestPaid(g.id)}>
                     <Banknote size={13} />
-                    {g.paid ? 'Оплачено' : 'Оплатить'} {recipient.name}{recipient.bank ? ` · ${recipient.bank}` : ''}
+                    {g.paid ? 'Оплачено' : 'Оплатить'} {recipient.name}{recipient.amount ? ` · ${recipient.amount}` : ''}{recipient.bank ? ` · ${recipient.bank}` : ''}
                   </button>
                   <CopyButton value={recipient.phone} />
                 </>
