@@ -3,6 +3,8 @@
 //
 //   https://<your-site>.vercel.app/api/tg-init?chat_id=-100XXXXXXXXXX&secret=<WEBHOOK_SECRET>
 
+import { buildText, saveTelegramState } from '../lib/telegram.js'
+
 export default async function handler(req, res) {
   const { chat_id, secret } = req.query
 
@@ -12,27 +14,18 @@ export default async function handler(req, res) {
   if (!chat_id) return res.status(400).send('chat_id required')
 
   const token = process.env.TELEGRAM_BOT_TOKEN
+  const text = buildText(null)
 
   const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id, text: '⚽ Настраиваю живое сообщение…' })
+    body: JSON.stringify({ chat_id, text })
   })
   const sendJson = await sendRes.json()
   if (!sendJson.ok) return res.status(500).json(sendJson)
 
   const messageId = sendJson.result.message_id
-
-  await fetch(`${process.env.VITE_SUPABASE_URL}/rest/v1/telegram_state`, {
-    method: 'POST',
-    headers: {
-      apikey: process.env.VITE_SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${process.env.VITE_SUPABASE_ANON_KEY}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates'
-    },
-    body: JSON.stringify({ id: 1, chat_id: String(chat_id), message_id: messageId })
-  })
+  await saveTelegramState(String(chat_id), messageId)
 
   const pinRes = await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
     method: 'POST',
